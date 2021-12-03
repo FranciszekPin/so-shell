@@ -113,7 +113,7 @@ noreturn void external_command(char **argv) {
   if (!index(argv[0], '/') && path) {
     /* TODO: For all paths in PATH construct an absolute path and execve it. */
 #ifdef STUDENT
-    char path_cpy[strlen(path)];
+    char path_cpy[strlen(path) + 1];
     char full_path[strlen(path) + strlen(argv[0]) + 1];
     /* copy is required to perform strtok */
     strcpy(path_cpy, path);
