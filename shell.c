@@ -31,8 +31,17 @@ static int do_redir(token_t *token, int ntokens, int *inputp, int *outputp) {
   for (int i = 0; i < ntokens; i++) {
     /* TODO: Handle tokens and open files as requested. */
 #ifdef STUDENT
-    (void)mode;
-    (void)MaybeClose;
+    if (token[i] != T_INPUT && token[i] != T_OUTPUT) {
+      if (mode == T_INPUT) {
+        MaybeClose(inputp);
+        *inputp = Open(token[i], O_RDONLY, 0700);
+      } else if (mode == T_OUTPUT) {
+        MaybeClose(outputp);
+        *outputp = Open(token[i], O_CREAT | O_WRONLY, 0700);
+      } else
+        n++;
+    } else
+      mode = token[i];
 #endif /* !STUDENT */
   }
 
@@ -58,6 +67,51 @@ static int do_job(token_t *token, int ntokens, bool bg) {
 
   /* TODO: Start a subprocess, create a job and monitor it. */
 #ifdef STUDENT
+  int pid = Fork();
+  if (pid) { /* parent */
+    setpgid(pid, pid);
+    /* input/output == -1 means stdout/stdin - not modyfied by do_redir */
+    if (input != -1)
+      Close(input);
+    if (output != -1)
+      Close(output);
+    int job_num = addjob(pid, bg);
+    addproc(job_num, pid, token);
+
+    if (!bg) {
+      exitcode = monitorjob(&mask);
+    } else {
+      printf("[%d] running '", job_num);
+      for (int i = 0; i < ntokens - 1; i++)
+        printf("%s ", token[i]);
+      printf("%s'\n", token[ntokens - 1]);
+    }
+  } else { /* child */
+    Setpgid(0, 0);
+    /* if child is fg then give it terminal access */
+    if (!bg)
+      setfgpgrp(getpgrp());
+
+    /* reset signal dispositions */
+    Signal(SIGINT, SIG_DFL);
+    Signal(SIGQUIT, SIG_DFL);
+    Signal(SIGTSTP, SIG_DFL);
+    Signal(SIGTTIN, SIG_DFL);
+    Signal(SIGTTOU, SIG_DFL);
+    Signal(SIGCHLD, SIG_DFL);
+
+    Sigprocmask(SIG_SETMASK, &mask, NULL);
+    if (input != -1) {
+      Dup2(input, STDIN_FILENO);
+      Close(input);
+    }
+    if (output != -1) {
+      Dup2(output, STDOUT_FILENO);
+      Close(output);
+    }
+
+    external_command(token);
+  }
 #endif /* !STUDENT */
 
   Sigprocmask(SIG_SETMASK, &mask, NULL);
@@ -76,6 +130,38 @@ static pid_t do_stage(pid_t pgid, sigset_t *mask, int input, int output,
   /* TODO: Start a subprocess and make sure it's moved to a process group. */
   pid_t pid = Fork();
 #ifdef STUDENT
+  if (pid) {
+    /* pgid == 0 means creating first process in a pipeline that will be group
+     * leader of the rest */
+    if (!pgid) {
+      pgid = pid;
+      setpgid(pid, pgid);
+    }
+    setpgid(pid, pgid);
+    if (input != -1)
+      Close(input);
+    if (output != -1)
+      Close(output);
+  } else {
+    Setpgid(0, pgid);
+    Signal(SIGINT, SIG_DFL);
+    Signal(SIGQUIT, SIG_DFL);
+    Signal(SIGTSTP, SIG_DFL);
+    Signal(SIGTTIN, SIG_DFL);
+    Signal(SIGTTOU, SIG_DFL);
+    Signal(SIGCHLD, SIG_DFL);
+    Sigprocmask(SIG_SETMASK, mask, NULL);
+    if (input != -1) {
+      Dup2(input, STDIN_FILENO);
+      Close(input);
+    }
+    if (output != -1) {
+      Dup2(output, STDOUT_FILENO);
+      Close(output);
+    }
+
+    external_command(token);
+  }
 #endif /* !STUDENT */
 
   return pid;
@@ -107,11 +193,48 @@ static int do_pipeline(token_t *token, int ntokens, bool bg) {
   /* TODO: Start pipeline subprocesses, create a job and monitor it.
    * Remember to close unused pipe ends! */
 #ifdef STUDENT
-  (void)input;
-  (void)job;
-  (void)pid;
-  (void)pgid;
-  (void)do_stage;
+  int i = 0;
+  while (token[i] != T_PIPE)
+    i++;
+  /* change T_PIPE into T_NULL to send it directly as char * null terminated */
+  token[i] = T_NULL;
+  pgid = do_stage(0, &mask, input, output, token, i, bg);
+  job = addjob(pgid, bg);
+  addproc(job, pgid, token);
+  int j = i + 1;
+  while (i < ntokens) {
+    while (token[j] != T_PIPE && j < ntokens)
+      j++;
+
+    token[j] = T_NULL;
+    input = next_input;
+
+    /* end of pipeline */
+    if (j >= ntokens) {
+      pid = do_stage(pgid, &mask, input, -1, &token[i + 1], j - i - 1, bg);
+      addproc(job, pid, &token[i + 1]);
+    }
+    /* in the middle of pipeline */
+    else {
+      mkpipe(&next_input, &output);
+      pid = do_stage(pgid, &mask, input, output, &token[i + 1], j - i - 1, bg);
+      addproc(job, pid, &token[i + 1]);
+    }
+    i = j;
+    j++;
+  }
+
+  if (!bg) {
+    exitcode = monitorjob(&mask);
+  } else {
+    printf("[%d] running '", job);
+    for (int i = 0; i < ntokens - 1; i++)
+      if (token[i] == T_NULL)
+        printf("| ");
+      else
+        printf("%s ", token[i]);
+    printf("%s'\n", token[ntokens - 1]);
+  }
 #endif /* !STUDENT */
 
   Sigprocmask(SIG_SETMASK, &mask, NULL);
